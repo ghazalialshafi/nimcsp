@@ -82,14 +82,6 @@ nimble build_cli
 
 ## Testing
 
-For a full, real-world-shaped demonstration of the library under load —
-not a toy loop — see [`showcase/`](showcase/README.md): a Resilient
-High-Throughput Distributed Microservices Telemetry Engine exercising
-dynamic worker pools, context-timeout-bounded lifetimes, multiplexed
-shutdown via `select`, RWMutex-protected shared state, and deterministic
-`WaitGroup` teardown, with a full code walkthrough and a Colab notebook
-you can run immediately.
-
 ```bash
 nimble test        # quick pass (few repetitions), for local iteration
 nimble testAll      # full suite, matching what CI runs
