@@ -283,23 +283,6 @@ gcc config.c myapp.o -lcsp -o myapp
 cspcli clean --working-dir=/tmp/libcsp
 ```
 
----
-
-## Key Design Decisions
-
-| C Original | Nim Port |
-|------------|----------|
-| `__attribute__((naked))` + inline ASM | `{.noStackFrame.}` + `{.emit.}` with GCC ASM |
-| `_Thread_local csp_core_t *csp_this_core` | `var cspThisCore {.threadvar.}: ptr CspCore` |
-| Union for proc registers | `CspProcRegisters {.union.}` |
-| `atomic_*` C11 | `std/atomics` |
-| `pthread_*` | `std/posix` `Pthread*` |
-| `csp_chan_declare` / `csp_chan_define` macros | Generic `RbqBase[T, FP, SP]` |
-| `csp_likely` / `csp_unlikely` | Template wrappers |
-| Naked function wrappers for goroutine entry | `{.emit.}` inline ASM blocks |
-| 3-level virtual memory manager | `mem.nim` with same layout |
-| Red-black tree | `rbtree.nim` |
-| `csp_sched_async` / `csp_sched_sync` macros | `cspAsync` / `cspSync` templates |
 
 ---
 
@@ -361,70 +344,4 @@ x86-64 Linux only (uses epoll, POSIX threads, inline x86-64 assembly).
 
 This library's asm-level context switching and lock-free scheduling
 mechanics went through substantial debugging to reach their current,
-stress-tested state. A few of the more instructive bugs, for anyone
-touching this code:
-
-- **Struct-layout drift between the naked asm and Nim's actual generated
-  layout is the most dangerous class of bug here**, because it's silent
-  in debug builds (zeroed memory hides it) and manifests as flaky,
-  optimization-level-dependent segfaults in release builds — e.g. a
-  `{.pure.}` enum packs to 1 byte, but asm compared it with a 4-byte
-  `cmpl`, reading uninitialized padding as part of the value. Every
-  offset the asm depends on now has a `static: doAssert offsetof(...)`
-  guard (see `csp_proc_types.nim`, `context_switch.nim`, `core.nim`) —
-  keep this pattern for any new asm-touched field.
-- **Two different "resume the anchor" code paths must agree on exactly
-  what the saved stack pointer means.** One path resumes via `jmp`
-  (expects the saved rsp to already account for the return address that
-  would otherwise be popped); another used to resume via a manual
-  write-to-stack + `retq` trick with the opposite convention. They shared
-  the same saved state, so fixing one broke the other. Both now use the
-  same `jmp`-based convention — don't reintroduce a second convention
-  without re-deriving both sides together.
-- **Anything allocated on one goroutine and freed on another must use the
-  shared heap** (`allocShared0`/`deallocShared`), never plain
-  `alloc0`/`dealloc` — this is an M:N scheduler, goroutines are not
-  pinned to an OS thread, and Nim's default allocator is thread-local.
-- **A proc marked `Runnable` is not the same as a proc that's actually in
-  a run queue.** `cspSchedulerSubmit`'s "already Runnable = someone else
-  is handling it" check is only valid for its intended callers (waking a
-  `Blocked` waiter); feeding it a proc that a timer/netpoll poll already
-  pre-marked `Runnable` silently drops it forever. Use
-  `cspSchedulerSubmitRunnable` for that case instead.
-- **Every voluntary yield needs to explicitly re-enqueue itself.** Unlike
-  blocking on a mutex/channel/timer, a plain yield has no other data
-  structure holding a reference to the proc — it must mark itself
-  `Runnable` and enqueue before yielding, or it's lost.
-- **Uninitialized FP control state is invisible until a goroutine does
-  float math.** A new goroutine's `mxcsr`/`x87cw` fields (the saved
-  floating-point exception-mask and rounding state, restored via
-  `ldmxcsr`/`fldcw` on every context switch) were never given a sane
-  initial value — left as whatever the allocator's raw memory happened
-  to contain. A zeroed MXCSR unmasks *every* FP exception, including
-  Precision, which fires on almost any inexact division — so a fresh
-  goroutine's first ordinary floating-point operation could `SIGFPE` on
-  memory that hadn't previously been used by a proc that had actually
-  run (reused memory from a previously-run proc masked this by luck,
-  since it would carry a real, sane saved value). This went unnoticed
-  through extensive stress testing because none of that testing did any
-  floating-point arithmetic inside a goroutine — a caution about
-  coverage, not just correctness: a stress suite exercising the
-  concurrency primitives thoroughly can still have a completely blind
-  spot for something as basic as "does normal arithmetic work." Found
-  via `tests/bench_context_switch.nim`, added specifically to exercise
-  the real context-switch path (see that file's header for why
-  `bench_million.nim` alone doesn't). Fixed in `cspProcNew` by
-  explicitly setting the real x86-64 ABI reset defaults (`0x1F80` /
-  `0x037F`) instead of leaving the fields implicitly zero.
-- **Code nobody actually runs accumulates real bugs, not just style
-  issues.** `src/example.nim` never called `cspInit()` (crashed
-  immediately), never waited for its spawned goroutines to finish before
-  the process exited (so most of its output silently never appeared), and
-  used the thread-local `alloc`/`dealloc` for values passed across a
-  channel (exactly the cross-thread heap bug described above). `cspcli`
-  didn't compile at all without an undocumented `--path:.` flag, and
-  separately had a bare `Option`/`initTable`/`HashSet` reference with no
-  matching import. None of this was caught by review; all of it was
-  caught by actually building and running these files. Don't assume a
-  file compiles or behaves correctly just because it looks reasonable —
-  build and run it.
+stress-tested state. 
